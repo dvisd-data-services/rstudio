@@ -1013,6 +1013,24 @@ core::Error createGitExclusionString(const FilePath& dirPath, std::string* pResu
    return Success();
 }
 
+void processExcludeFilePatterns(
+   const json::Array& excludeFilePatterns, std::string* pCmdArg, bool* pGitFlag)
+{
+   *pGitFlag = false;
+   for (json::Value filePattern : excludeFilePatterns)
+   {
+      if (filePattern.getType() != json::Type::STRING)
+         LOG_WARNING_MESSAGE("Exclude files contain non-string value");
+      else
+      {
+         if (filePattern.getString().compare("gitExclusions") == 0)
+            *pGitFlag = true;
+         else
+            pCmdArg->append("--exclude=" + filePattern.getString());
+      }
+   }
+}
+
 core::Error runGrepOperation(const GrepOptions& grepOptions, const ReplaceOptions& replaceOptions,
    LocalProgress* pProgress, json::JsonRpcResponse* pResponse)
 {
@@ -1064,9 +1082,24 @@ core::Error runGrepOperation(const GrepOptions& grepOptions, const ReplaceOption
 #else
    shell_utils::ShellCommand cmd("grep");
 #endif
-   cmd << "-rHn" << "--binary-files=without-match" << "--color=always";
+
+   std::string excludeArgs;
+   bool gitFlag = false;
+   processExcludeFilePatterns(grepOptions.excludeFilePatterns, &excludeArgs, &gitFlag);
+   if (gitFlag)
+   {
+      cmd = shell_utils::ShellCommand("git");
+      cmd <<  "grep";
+      cmd << "--untracked";
+      cmd << "--exclude-standard";
+   }
+   cmd << "-rHn" << "--color=always";
+   if (!gitFlag)
+      cmd << "--binary-files=without-match";
+
 #ifndef _WIN32
-   cmd << "--devices=skip";
+   if (!gitFlag)
+      cmd << "--devices=skip";
 #endif
 
    if (grepOptions.ignoreCase)
@@ -1079,42 +1112,22 @@ core::Error runGrepOperation(const GrepOptions& grepOptions, const ReplaceOption
    if (!grepOptions.asRegex)
       cmd << "-F";
 
-   for (json::Value filePattern : grepOptions.filePatterns)
+   if (!gitFlag) // !!! need to revisit
    {
-      cmd << "--include=" + filePattern.getString();
-   }
-
-   // Filepaths received from the client will be UTF-8 encoded;
-   // convert to system encoding here.
-   FilePath dirPath = module_context::resolveAliasedPath(grepOptions.directory);
-   for (json::Value filePattern : grepOptions.excludeFilePatterns)
-   {
-      if (filePattern.getType() != json::Type::STRING)
-         LOG_WARNING_MESSAGE("Exclude files contain non-string value");
-      else
+      for (json::Value filePattern : grepOptions.filePatterns)
       {
-         // to retrieve the git exclusions, we run a git command and parse the output
-         if (filePattern.getString().compare("gitExclusions") == 0)
-         {
-            std::string excludeGitExclusion;
-            error = createGitExclusionString(dirPath, &excludeGitExclusion);
-            if (error)
-               return error;
-   
-            std::istringstream stream(excludeGitExclusion);
-            std::vector<std::string> results((std::istream_iterator<std::string>(stream)),
-               std::istream_iterator<std::string>());
-            for (std::string filePattern : results)
-            {
-               filePattern.insert(0, dirPath.getAbsolutePath() + "/");
-               cmd << "--exclude=" + filePattern;
-            }
-         }
-         else
-            cmd << "--exclude=" + filePattern.getString();
+         cmd << "--include=" + filePattern.getString();
       }
    }
 
+   if (!excludeArgs.empty())
+      cmd << excludeArgs;
+ 
+   // !!! TODO: Need to clean this up so it can be used properly with the git command,
+   // possibly using the -C flag
+   // Filepaths received from the client will be UTF-8 encoded;
+   // convert to system encoding here.
+   FilePath dirPath = module_context::resolveAliasedPath(grepOptions.directory);
    cmd << shell_utils::EscapeFilesOnly << "--" << shell_utils::EscapeAll;
    cmd << string_utils::utf8ToSystem(dirPath.getAbsolutePath());
 
